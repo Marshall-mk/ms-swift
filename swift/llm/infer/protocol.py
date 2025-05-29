@@ -102,6 +102,7 @@ class MultiModalRequestMixin:
     images: List[str] = field(default_factory=list)
     audios: List[str] = field(default_factory=list)
     videos: List[str] = field(default_factory=list)
+    tensors: List[str] = field(default_factory=list)
     objects: Dict[str, List[Any]] = field(default_factory=dict)
 
     @staticmethod

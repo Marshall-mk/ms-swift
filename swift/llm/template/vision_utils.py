@@ -273,3 +273,12 @@ def load_video_ovis2(video_path, num_frames):
         frames = [clip.get_frame(index / clip.fps) for index in sampled_indices]
         frames = [Image.fromarray(frame, mode='RGB') for frame in frames]
     return frames
+
+def load_tensor_npy(tensor_path: Union[str, bytes]) -> np.ndarray:  
+    import numpy as np  
+    tensor_io = load_file(tensor_path)  
+    return np.load(tensor_io)  
+  
+def load_tensor_pt(tensor_path: Union[str, bytes]) -> torch.Tensor:  
+    tensor_io = load_file(tensor_path)  
+    return torch.load(tensor_io)

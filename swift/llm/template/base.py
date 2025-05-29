@@ -25,7 +25,7 @@ from swift.utils import get_dist_setting, get_env_args, get_logger, use_torchacc
 from ..utils import Processor, ProcessorMixin
 from .template_inputs import InferRequest, StdTemplateInputs, TemplateInputs
 from .utils import Context, ContextType, StopWordsCriteria, fetch_one, findall, split_str_parts_by
-from .vision_utils import load_audio, load_batch, load_image, rescale_image
+from .vision_utils import load_audio, load_batch, load_image, rescale_image, load_tensor_npy, load_tensor_pt
 
 logger = get_logger()
 if TYPE_CHECKING:
@@ -37,12 +37,13 @@ class MaxLengthError(ValueError):
 
 
 class Template(ProcessorMixin):
-    special_tokens = ['<image>', '<video>', '<audio>', '<bbox>', '<ref-object>', '<cot-process>', '<start-image>']
-    special_keys = ['images', 'videos', 'audios', 'objects']
+    special_tokens = ['<image>', '<video>', '<audio>', '<tensor>', '<bbox>', '<ref-object>', '<cot-process>', '<start-image>']
+    special_keys = ['images', 'videos', 'audios', 'tensors', 'objects']
 
     image_placeholder = ['<image>']
     video_placeholder = ['<video>']
     audio_placeholder = ['<audio>']
+    tensor_placeholder = ['<tensor>']
     cot_process_placeholder = ['ки']
     placeholder_tokens = []  # For clearer printing
     load_images = True
@@ -257,6 +258,19 @@ class Template(ProcessorMixin):
             sampling_rate = get_env_args('sampling_rate', int, None)
             inputs.audios = load_batch(
                 inputs.audios, load_func=partial(load_audio, sampling_rate=sampling_rate, return_sr=True))
+
+        # Load tensors
+        if inputs.tensors:
+            load_tensors = self.load_images or self.mode in {'vllm', 'lmdeploy'}
+            if load_tensors:
+                for i, tensor_path in enumerate(inputs.tensors):
+                    if isinstance(tensor_path, str):
+                        if tensor_path.endswith('.npy'):
+                            inputs.tensors[i] = load_tensor_npy(tensor_path)
+                        elif tensor_path.endswith('.pt'):
+                            inputs.tensors[i] = load_tensor_pt(tensor_path)
+                        else:
+                            logger.warning(f'Unsupported tensor format: {tensor_path}. Supported formats: .npy, .pt')
 
         if inputs.is_multimodal:
             self._add_default_tags(inputs)
@@ -664,7 +678,7 @@ class Template(ProcessorMixin):
         return self.tokenizer(
             context, return_attention_mask=False, add_special_tokens=False, **tokenizer_kwargs)['input_ids']
 
-    def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index: int,
+    def replace_tag(self, media_type: Literal['image', 'video', 'audio', 'tensor'], index: int,
                     inputs: StdTemplateInputs) -> List[Context]:
         """Override this function to do your own replace operation.
 
@@ -686,6 +700,8 @@ class Template(ProcessorMixin):
             return self.video_placeholder
         elif media_type == 'audio':
             return self.audio_placeholder
+        elif media_type == 'tensor':
+            return self.tensor_placeholder
 
     def replace_ref(self, ref: str, index: int, inputs: StdTemplateInputs) -> List[Context]:
         """Replace objects referenced by the bbox to contents or input_ids. This is useful in the grounding task.
@@ -772,11 +788,11 @@ class Template(ProcessorMixin):
         res_loss_scale: List[float] = []  # result of loss_scale_list
 
         # reset
-        for k in ['video', 'audio', 'object', 'box']:
+        for k in ['video', 'audio', 'tensor', 'object', 'box']:
             setattr(inputs, f'{k}_idx', 0)
 
         for context, loss_scale in zip(context_list, loss_scale_list):
-            for k in ['video', 'audio']:
+            for k in ['video', 'audio', 'tensor']:
                 if context == f'<{k}>' and inputs.is_multimodal and getattr(inputs, f'{k}_idx') < len(
                         getattr(inputs, f'{k}s')):
                     c_list = self.replace_tag(k, getattr(inputs, f'{k}_idx'), inputs)
@@ -812,7 +828,7 @@ class Template(ProcessorMixin):
                 total_content += '\n'.join(inputs.rejected_response)
         if inputs.system:
             total_content = f'{inputs.system}\n{total_content}'
-        for media_type in ['image', 'audio', 'video']:
+        for media_type in ['image', 'audio', 'video', 'tensor']:
             media_key, media_tag = f'{media_type}s', f'<{media_type}>'
             medias = getattr(inputs, media_key)
             if not isinstance(medias, list):
@@ -1445,6 +1461,18 @@ class Template(ProcessorMixin):
         pixel_values_videos = [b['pixel_values_videos'] for b in batch if b.get('pixel_values_videos') is not None]
         if len(pixel_values_videos) > 0:
             res['pixel_values_videos'] = torch.concat(pixel_values_videos)
+        
+        # Handle tensor data
+        tensor_data = [b['tensor_data'] for b in batch if b.get('tensor_data') is not None]
+        if len(tensor_data) > 0:
+            # Concatenate tensor data if all tensors have the same shape (except batch dimension)
+            # Otherwise, store as a list for custom processing
+            try:
+                res['tensor_data'] = torch.stack(tensor_data)
+            except RuntimeError:
+                # If tensors can't be stacked (different shapes), keep as list
+                res['tensor_data'] = tensor_data
+        
         return res
 
     def _torchacc_xtuner_data_collator(self, res, padding_to, tokenizer, padding_side):
